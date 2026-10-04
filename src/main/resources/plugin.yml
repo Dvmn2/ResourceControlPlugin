@@ -2,7 +2,15 @@ name: ResourceControlPlugin
 version: '${version}'
 
 main: net.dvmn2.resourcecontrolplugin.ResourceControlPlugin
-api-version: '1.21.11'
+api-version: '1.21'
 load: POSTWORLD
 
 authors: [ DVMN2 ]
+
+permissions:
+  resourcecontrol.admin:
+    description: Доступ к командам /resourcecontrol
+    default: op
+  resourcecontrol.bypass:
+    description: Не кикается за отсутствие клиентского мода ResourceControl
+    default: false

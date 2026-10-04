@@ -1,0 +1,30 @@
+# Язык сообщений плагина: "ru", "en" или "auto".
+# "auto" — для игрока берётся его игровая локаль, для консоли — английский.
+#
+# Plugin message language: "ru", "en" or "auto".
+settings:
+  language: auto
+
+  # Кикать игроков без клиентского мода ResourceControl.
+  # Исключение: право resourcecontrol.bypass.
+  require-client-mod: true
+  mod-check-timeout-seconds: 10
+
+  # Разрешить паки с core-шейдерами (assets/*/shaders). Могут конфликтовать с Sodium/Iris.
+  # Если false — такие паки не отправляются клиентам, а мод дополнительно отклоняет их сам.
+  allow-shaders: true
+
+  # Максимальный размер пака (МБ) при проверке командой /resourcecontrol pack add|refresh.
+  max-pack-size-mb: 256
+
+  # Как часто (сек.) пересчитывать набор паков игроков.
+  # Нужно, чтобы выдача/снятие групповых прав (LuckPerms и т.п.) применялись без перезахода.
+  group-check-interval-seconds: 5
+
+# Групповые наборы. Игрок с правом resourcecontrol.group.<имя группы>
+# получает перечисленные паки в дополнение к индивидуально выданным.
+# Пример (LuckPerms): lp group vip permission set resourcecontrol.group.vip true
+groups:
+  # vip:
+  #   - hud-minimal
+  #   - inventory-dark
