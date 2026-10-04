@@ -1,0 +1,8 @@
+name: ResourceControlPlugin
+version: '${version}'
+
+main: net.dvmn2.resourcecontrolplugin.ResourceControlPlugin
+api-version: '1.21.11'
+load: POSTWORLD
+
+authors: [ DVMN2 ]
