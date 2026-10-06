@@ -35,6 +35,8 @@ import java.util.stream.Collectors;
 public final class SyncManager implements Listener, PluginMessageListener {
 
     public static final String SYNC_CHANNEL = "dvmn2:rc_sync";
+    /** Запрос лимита размера пака: клиент спрашивает игрока и хранит его решение у себя. */
+    public static final String LIMIT_CHANNEL = "dvmn2:rc_limit";
     public static final String STATUS_CHANNEL = "dvmn2:rc_status";
     public static final int PROTOCOL = 1;
 
@@ -53,6 +55,7 @@ public final class SyncManager implements Listener, PluginMessageListener {
     private final ResourceControlPlugin plugin;
     private final Map<UUID, String> lastSent = new HashMap<>();
     private final Map<UUID, ClientStatus> statuses = new HashMap<>();
+    private final Map<UUID, Long> lastLimit = new HashMap<>();
 
     public SyncManager(ResourceControlPlugin plugin) {
         this.plugin = plugin;
@@ -66,8 +69,19 @@ public final class SyncManager implements Listener, PluginMessageListener {
         return plugin.getConfig().getBoolean("settings.allow-shaders", true);
     }
 
+    /** Мод актуальной версии слушает ОБА канала (старые версии без rc_limit считаются «без мода»). */
     public static boolean hasMod(Player player) {
-        return player.getListeningPluginChannels().contains(SYNC_CHANNEL);
+        Set<String> channels = player.getListeningPluginChannels();
+        return channels.contains(SYNC_CHANNEL) && channels.contains(LIMIT_CHANNEL);
+    }
+
+    /**
+     * Лимит размера одного пака в байтах: settings.max-pack-size-mb (тот же, что при /resourcecontrol pack add).
+     * Не больше 4096 МБ — это абсолютный потолок клиента, больший он всё равно обрежет.
+     */
+    public long maxPackBytes() {
+        long mb = plugin.getConfig().getLong("settings.max-pack-size-mb", 256L);
+        return Math.min(Math.max(1L, mb), 4096L) * 1048576L;
     }
 
     public Set<String> groupPackNames(Player player) {
@@ -119,6 +133,7 @@ public final class SyncManager implements Listener, PluginMessageListener {
         if (!hasMod(player)) {
             return;
         }
+        sendLimit(player, force);
         List<PackInfo> packs = effectivePacks(player);
         boolean allowShaders = allowShaders();
         String signature = allowShaders + "#" + packs.stream().map(PackInfo::signature).collect(Collectors.joining(";"));
@@ -150,6 +165,25 @@ public final class SyncManager implements Listener, PluginMessageListener {
             lastSent.put(player.getUniqueId(), signature);
         } catch (IllegalArgumentException ex) {
             plugin.getLogger().warning("Не удалось отправить rc_sync игроку " + player.getName() + ": " + ex.getMessage());
+        }
+    }
+
+    /** Шлёт лимит (до набора паков!), если он изменился или force. Решение игрока остаётся на клиенте. */
+    private void sendLimit(Player player, boolean force) {
+        long limit = maxPackBytes();
+        Long previous = lastLimit.get(player.getUniqueId());
+        if (!force && previous != null && previous == limit) {
+            return;
+        }
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        DataOutputStream out = new DataOutputStream(bytes);
+        try {
+            writeVarInt(out, PROTOCOL);
+            writeVarLong(out, limit);
+            player.sendPluginMessage(plugin, LIMIT_CHANNEL, bytes.toByteArray());
+            lastLimit.put(player.getUniqueId(), limit);
+        } catch (IOException | IllegalArgumentException ex) {
+            plugin.getLogger().warning("Не удалось отправить rc_limit игроку " + player.getName() + ": " + ex.getMessage());
         }
     }
 
@@ -254,12 +288,18 @@ public final class SyncManager implements Listener, PluginMessageListener {
     /** Клиент с модом регистрирует канал уже после входа — в этот момент шлём ему набор. */
     @EventHandler
     public void onRegisterChannel(PlayerRegisterChannelEvent event) {
-        if (!SYNC_CHANNEL.equals(event.getChannel())) {
+        String channel = event.getChannel();
+        if (!SYNC_CHANNEL.equals(channel) && !LIMIT_CHANNEL.equals(channel)) {
             return;
         }
         Player player = event.getPlayer();
+        // Каналы регистрируются по одному: действуем, когда зарегистрированы оба.
+        if (!hasMod(player)) {
+            return;
+        }
         lastSent.remove(player.getUniqueId());
-        sync(player, true);
+        lastLimit.remove(player.getUniqueId());
+        sync(player, true); // сначала rc_limit, затем rc_sync
     }
 
     @EventHandler
@@ -271,6 +311,7 @@ public final class SyncManager implements Listener, PluginMessageListener {
     public void onQuit(PlayerQuitEvent event) {
         UUID uuid = event.getPlayer().getUniqueId();
         lastSent.remove(uuid);
+        lastLimit.remove(uuid);
         statuses.remove(uuid);
         plugin.getAssignments().forget(uuid);
     }

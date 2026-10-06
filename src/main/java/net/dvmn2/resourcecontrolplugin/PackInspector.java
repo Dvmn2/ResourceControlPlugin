@@ -4,7 +4,13 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParseException;
 import com.google.gson.JsonParser;
 
-import java.io.*;
+import java.io.ByteArrayInputStream;
+import java.io.FilterInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.Reader;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -67,9 +73,7 @@ public final class PackInspector {
         }
     }
 
-    /**
-     * Один проход по потоку: лимит -> SHA-1 -> разбор zip. Без записи на диск.
-     */
+    /** Один проход по потоку: лимит -> SHA-1 -> разбор zip. Без записи на диск. */
     static Result analyze(InputStream body, long maxBytes) throws IOException {
         MessageDigest digest;
         try {
@@ -120,9 +124,7 @@ public final class PackInspector {
         return new Result(HexFormat.of().formatHex(digest.digest()), total, format, shaders);
     }
 
-    /**
-     * Читает pack.mcmeta из текущей записи ZipInputStream (не закрывая поток).
-     */
+    /** Читает pack.mcmeta из текущей записи ZipInputStream (не закрывая поток). */
     private static String readPackFormat(InputStream entryStream) throws IOException {
         // pack.mcmeta крошечный; жёсткий потолок защищает от мусора в архиве
         byte[] data = entryStream.readNBytes(MAX_MCMETA_BYTES + 1);
@@ -147,9 +149,7 @@ public final class PackInspector {
         }
     }
 
-    /**
-     * Считает прочитанные байты и обрывает чтение при превышении лимита.
-     */
+    /** Считает прочитанные байты и обрывает чтение при превышении лимита. */
     private static final class LimitedInputStream extends FilterInputStream {
         private final long max;
         private long count;

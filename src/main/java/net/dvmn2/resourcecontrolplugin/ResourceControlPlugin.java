@@ -36,6 +36,7 @@ public final class ResourceControlPlugin extends JavaPlugin {
         getServer().getPluginManager().registerEvents(new PackGuiListener(this), this);
 
         // Исходящий канал: набор паков -> мод. Входящий: статус применения <- мод.
+        getServer().getMessenger().registerOutgoingPluginChannel(this, SyncManager.LIMIT_CHANNEL);
         getServer().getMessenger().registerOutgoingPluginChannel(this, SyncManager.SYNC_CHANNEL);
         getServer().getMessenger().registerIncomingPluginChannel(this, SyncManager.STATUS_CHANNEL, syncManager);
 
