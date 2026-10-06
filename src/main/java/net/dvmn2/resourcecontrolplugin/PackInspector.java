@@ -4,29 +4,24 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParseException;
 import com.google.gson.JsonParser;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.io.Reader;
+import java.io.*;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
-import java.util.Enumeration;
 import java.util.HexFormat;
 import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
+import java.util.zip.ZipException;
+import java.util.zip.ZipInputStream;
 
 /**
- * Скачивает пак по URL (во ВРЕМЕННЫЙ файл), считает SHA-1 и размер, проверяет, что это zip
- * с pack.mcmeta в корне, и ищет core-шейдеры. Вызывать ТОЛЬКО из асинхронного потока.
+ * Скачивает пак по URL потоком (БЕЗ записи на диск), на лету считает SHA-1 и размер,
+ * проверяет, что это zip с pack.mcmeta в корне, и ищет core-шейдеры. Вызывать ТОЛЬКО из асинхронного потока.
  */
 public final class PackInspector {
 
@@ -37,6 +32,8 @@ public final class PackInspector {
             .followRedirects(HttpClient.Redirect.NORMAL)
             .connectTimeout(Duration.ofSeconds(15))
             .build();
+
+    private static final int MAX_MCMETA_BYTES = 64 * 1024;
 
     private PackInspector() {
     }
@@ -52,68 +49,87 @@ public final class PackInspector {
             throw new IOException("разрешены только https-ссылки");
         }
 
-        Path tmp = Files.createTempFile("resourcecontrol-", ".zip");
-        try {
-            HttpRequest request = HttpRequest.newBuilder(uri)
-                    .timeout(Duration.ofSeconds(60))
-                    .header("User-Agent", "ResourceControlPlugin/1.0")
-                    .GET()
-                    .build();
-            HttpResponse<InputStream> response = HTTP.send(request, HttpResponse.BodyHandlers.ofInputStream());
-            String sha1;
-            long total = 0;
-            try (InputStream in = response.body()) {
-                if (response.statusCode() != 200) {
-                    throw new IOException("HTTP " + response.statusCode());
-                }
-                if (!"https".equalsIgnoreCase(response.uri().getScheme())) {
-                    throw new IOException("редирект на не-https адрес");
-                }
-                MessageDigest digest = MessageDigest.getInstance("SHA-1");
-                try (OutputStream out = Files.newOutputStream(tmp)) {
-                    byte[] buffer = new byte[64 * 1024];
-                    int read;
-                    while ((read = in.read(buffer)) >= 0) {
-                        total += read;
-                        if (total > maxBytes) {
-                            throw new IOException("файл больше лимита " + (maxBytes / 1048576) + " МБ");
-                        }
-                        digest.update(buffer, 0, read);
-                        out.write(buffer, 0, read);
-                    }
-                }
-                sha1 = HexFormat.of().formatHex(digest.digest());
-            } catch (NoSuchAlgorithmException ex) {
-                throw new IOException(ex);
+        HttpRequest request = HttpRequest.newBuilder(uri)
+                .timeout(Duration.ofSeconds(60))
+                .header("User-Agent", "ResourceControlPlugin/1.0")
+                .GET()
+                .build();
+        HttpResponse<InputStream> response = HTTP.send(request, HttpResponse.BodyHandlers.ofInputStream());
+        try (InputStream body = response.body()) {
+            if (response.statusCode() != 200) {
+                throw new IOException("HTTP " + response.statusCode());
             }
-            if (total == 0) {
-                throw new IOException("пустой файл");
+            if (!"https".equalsIgnoreCase(response.uri().getScheme())) {
+                throw new IOException("редирект на не-https адрес");
             }
 
-            try (ZipFile zip = new ZipFile(tmp.toFile())) {
-                ZipEntry mcmeta = zip.getEntry("pack.mcmeta");
-                if (mcmeta == null) {
-                    throw new IOException("в корне архива нет pack.mcmeta (возможно, всё лежит внутри вложенной папки)");
-                }
-                String format = readPackFormat(zip, mcmeta);
-                boolean shaders = false;
-                Enumeration<? extends ZipEntry> entries = zip.entries();
-                while (entries.hasMoreElements()) {
-                    String[] parts = entries.nextElement().getName().split("/");
-                    if (parts.length >= 3 && parts[0].equals("assets") && parts[2].equals("shaders")) {
-                        shaders = true;
-                        break;
-                    }
-                }
-                return new Result(sha1, total, format, shaders);
-            }
-        } finally {
-            Files.deleteIfExists(tmp);
+            return analyze(body, maxBytes);
         }
     }
 
-    private static String readPackFormat(ZipFile zip, ZipEntry mcmeta) {
-        try (Reader reader = new InputStreamReader(zip.getInputStream(mcmeta), StandardCharsets.UTF_8)) {
+    /**
+     * Один проход по потоку: лимит -> SHA-1 -> разбор zip. Без записи на диск.
+     */
+    static Result analyze(InputStream body, long maxBytes) throws IOException {
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-1");
+        } catch (NoSuchAlgorithmException ex) {
+            throw new IOException(ex);
+        }
+
+        // Всё в один проход, без записи на диск: лимит размера и подсчёт байт -> SHA-1 -> разбор zip.
+        LimitedInputStream limited = new LimitedInputStream(body, maxBytes);
+        DigestInputStream digested = new DigestInputStream(limited, digest);
+
+        boolean anyEntry = false;
+        boolean mcmetaFound = false;
+        boolean shaders = false;
+        String format = "не указан";
+        try (ZipInputStream zip = new ZipInputStream(digested)) {
+            ZipEntry entry;
+            while ((entry = zip.getNextEntry()) != null) {
+                anyEntry = true;
+                String name = entry.getName();
+                if (name.equals("pack.mcmeta")) {
+                    mcmetaFound = true;
+                    format = readPackFormat(zip);
+                } else {
+                    String[] parts = name.split("/");
+                    if (parts.length >= 3 && parts[0].equals("assets") && parts[2].equals("shaders")) {
+                        shaders = true;
+                    }
+                }
+            }
+            // Хвост файла (центральный каталог zip) тоже должен попасть в SHA-1 и в подсчёт размера.
+            digested.transferTo(OutputStream.nullOutputStream());
+        } catch (ZipException ex) {
+            throw new IOException("файл не является корректным zip-архивом: " + ex.getMessage());
+        }
+
+        long total = limited.count();
+        if (total == 0) {
+            throw new IOException("пустой файл");
+        }
+        if (!anyEntry) {
+            throw new IOException("файл не является zip-архивом (возможно, ссылка ведёт на html-страницу)");
+        }
+        if (!mcmetaFound) {
+            throw new IOException("в корне архива нет pack.mcmeta (возможно, всё лежит внутри вложенной папки)");
+        }
+        return new Result(HexFormat.of().formatHex(digest.digest()), total, format, shaders);
+    }
+
+    /**
+     * Читает pack.mcmeta из текущей записи ZipInputStream (не закрывая поток).
+     */
+    private static String readPackFormat(InputStream entryStream) throws IOException {
+        // pack.mcmeta крошечный; жёсткий потолок защищает от мусора в архиве
+        byte[] data = entryStream.readNBytes(MAX_MCMETA_BYTES + 1);
+        if (data.length > MAX_MCMETA_BYTES) {
+            return "pack.mcmeta слишком большой";
+        }
+        try (Reader reader = new InputStreamReader(new ByteArrayInputStream(data), StandardCharsets.UTF_8)) {
             JsonObject root = JsonParser.parseReader(reader).getAsJsonObject();
             JsonObject pack = root.getAsJsonObject("pack");
             if (pack == null) {
@@ -126,8 +142,63 @@ public final class PackInspector {
                 return "min_format=" + pack.get("min_format") + ", max_format=" + pack.get("max_format");
             }
             return "не указан";
-        } catch (IOException | JsonParseException | IllegalStateException ex) {
+        } catch (JsonParseException | IllegalStateException ex) {
             return "pack.mcmeta не читается";
+        }
+    }
+
+    /**
+     * Считает прочитанные байты и обрывает чтение при превышении лимита.
+     */
+    private static final class LimitedInputStream extends FilterInputStream {
+        private final long max;
+        private long count;
+
+        LimitedInputStream(InputStream in, long max) {
+            super(in);
+            this.max = max;
+        }
+
+        long count() {
+            return count;
+        }
+
+        private void add(long n) throws IOException {
+            count += n;
+            if (count > max) {
+                throw new IOException("файл больше лимита " + (max / 1048576) + " МБ");
+            }
+        }
+
+        @Override
+        public int read() throws IOException {
+            int b = super.read();
+            if (b >= 0) {
+                add(1);
+            }
+            return b;
+        }
+
+        @Override
+        public int read(byte[] buf, int off, int len) throws IOException {
+            int n = super.read(buf, off, len);
+            if (n > 0) {
+                add(n);
+            }
+            return n;
+        }
+
+        @Override
+        public long skip(long n) throws IOException {
+            // skip() обошёл бы подсчёт и SHA-1 — читаем явно
+            byte[] tmp = new byte[(int) Math.min(8192, Math.max(0, n))];
+            int r = tmp.length == 0 ? 0 : read(tmp, 0, tmp.length);
+            return Math.max(r, 0);
+        }
+
+        @Override
+        public boolean markSupported() {
+            return false;
         }
     }
 }
